@@ -1,0 +1,54 @@
+version: 1
+
+services:
+  # 后端服务
+  backend:
+    type: web
+    name: live-debate-backend
+    env: node
+    buildCommand: cd backend && npm install
+    startCommand: cd backend && npm start
+    envVars:
+      - key: PORT
+        value: 3000
+      - key: NODE_ENV
+        value: production
+    autoDeploy: true
+
+  # 前端服务
+  frontend:
+    type: web
+    name: live-debate-frontend
+    env: node
+    buildCommand: cd frontend && npm install && npm run build:h5
+    startCommand: cd frontend && npm start
+    envVars:
+      - key: PORT
+        value: 8081
+      - key: NODE_ENV
+        value: production
+    autoDeploy: true
+
+  # 网关服务
+  gateway:
+    type: web
+    name: live-debate-gateway
+    env: node
+    buildCommand: cd gateway && npm install
+    startCommand: cd gateway && npm start
+    envVars:
+      - key: PORT
+        value: 8080
+      - key: NODE_ENV
+        value: production
+      - key: BACKEND_URL
+        fromService: 
+          type: web
+          name: live-debate-backend
+          property: hostUrl
+      - key: FRONTEND_URL
+        fromService:
+          type: web
+          name: live-debate-frontend
+          property: hostUrl
+    autoDeploy: true
