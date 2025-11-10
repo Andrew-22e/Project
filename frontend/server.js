@@ -9,7 +9,8 @@ const serverCfg = require('./config/server-mode.node.js');
 const { getCurrentServerConfig, printConfig, BACKEND_SERVER_URL, PRIORITIZE_BACKEND_SERVER } = serverCfg;
 
 const currentConfig = getCurrentServerConfig();
-const port = currentConfig.port; // 直接使用配置中的端口（mock和非mock模式都已配置为8080）
+// 强制使用8081端口，避免与网关(8080)冲突
+const port = 8081;
 
 // ==================== WebSocket 支持 ====================
 // 尝试加载 ws 模块（如果未安装需要运行: npm install ws）
@@ -181,7 +182,61 @@ app.options('*', (req, res) => {
     res.sendStatus(204);
 });
 
-app.use(express.json());
+// 确保JSON解析中间件在代理之前加载
+app.use(express.json({ limit: '10mb' })); // 增加请求体大小限制
+
+// ==================== 优先代理到后端服务器（如果启用） ====================
+// 确保所有 API 请求都代理到网关服务器
+console.log('🔗 启用后端服务器优先模式：所有 API 请求将优先代理到后端服务器');
+console.log(`🔗 后端服务器地址: ${BACKEND_SERVER_URL}`);
+
+// 创建代理中间件 - 代理所有 /api 开头的路径到网关服务器
+const backendProxy = createProxyMiddleware({
+	target: BACKEND_SERVER_URL,
+	changeOrigin: true,
+	pathRewrite: {
+		// 保持路径不变，直接转发
+		'^/api': '/api'
+	},
+	logger: console,
+	onProxyReq: (proxyReq, req, res) => {
+		console.log(`🔄 [代理] ${req.method} ${req.path} -> ${BACKEND_SERVER_URL}${req.path}`);
+		// 确保POST请求的内容类型正确
+		if (req.method === 'POST' || req.method === 'PUT') {
+			proxyReq.setHeader('Content-Type', 'application/json');
+			// 确保请求体数据被正确处理
+			const bodyData = req.body;
+			if (bodyData) {
+				proxyReq.write(JSON.stringify(bodyData));
+				proxyReq.end();
+			}
+		}
+	},
+	onProxyRes: (proxyRes, req, res) => {
+		console.log(`✅ [代理] ${req.path} <- ${proxyRes.statusCode} ${BACKEND_SERVER_URL}`);
+		// 确保CORS头正确设置
+		proxyRes.headers['Access-Control-Allow-Origin'] = '*';
+		proxyRes.headers['Access-Control-Allow-Methods'] = 'GET, POST, PUT, DELETE, OPTIONS';
+		proxyRes.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization, X-Requested-With';
+	},
+	onError: (err, req, res) => {
+		console.error(`❌ [代理错误] ${req.path}:`, err.message);
+		if (!res.headersSent) {
+			res.status(502).json({
+				success: false,
+				error: 'Bad Gateway',
+				message: `无法连接到后端服务器 ${BACKEND_SERVER_URL}`,
+				path: req.path,
+				details: err.message
+			});
+		}
+	}
+});
+
+// 在所有本地路由之前，添加代理中间件
+// 使用 app.use('/api', ...) 确保所有 /api 开头的请求都被代理（包括 /api/v1/*）
+app.use('/api', backendProxy);
+console.log('✅ 代理中间件已成功配置');
 
 // ==================== 后台管理路由（必须在代理之前） ====================
 const path = require('path');
@@ -200,394 +255,1020 @@ app.use('/static', express.static(path.join(__dirname, 'static')));
 
 // 根路径处理，返回index.html
 app.get('/', (req, res) => {
-    // API说明页面
+    // API测试页面
     const apiDocumentation = `
     <!DOCTYPE html>
     <html lang="zh-CN">
     <head>
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>API接口文档</title>
+        <title>API接口测试工具</title>
         <style>
+            /* 全局样式 */
+            * {
+                box-sizing: border-box;
+                margin: 0;
+                padding: 0;
+            }
+            
             body {
                 font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
                 line-height: 1.6;
                 color: #333;
+                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                min-height: 100vh;
+                padding: 20px;
+            }
+            
+            .container {
                 max-width: 1200px;
                 margin: 0 auto;
-                padding: 20px;
-                background-color: #f5f5f5;
+                background: white;
+                border-radius: 12px;
+                box-shadow: 0 8px 32px rgba(0, 0, 0, 0.1);
+                overflow: hidden;
             }
-            h1 {
-                color: #2c3e50;
+            
+            /* 头部样式 */
+            .header {
+                background: linear-gradient(135deg, #4facfe 0%, #00f2fe 100%);
+                color: white;
+                padding: 30px;
                 text-align: center;
+                box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+            }
+            
+            h1 {
+                font-size: 2.5rem;
+                margin-bottom: 10px;
+                font-weight: 700;
+                text-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+            }
+            
+            .subtitle {
+                font-size: 1.1rem;
+                opacity: 0.9;
+                margin-bottom: 20px;
+            }
+            
+            /* 过滤区域 */
+            .filter-container {
+                margin-top: 20px;
+            }
+            
+            .filter-input {
+                padding: 12px 20px;
+                width: 500px;
+                max-width: 100%;
+                border: none;
+                border-radius: 25px;
+                font-size: 16px;
+                background: rgba(255, 255, 255, 0.95);
+                box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+                transition: all 0.3s ease;
+            }
+            
+            .filter-input:focus {
+                outline: none;
+                background: white;
+                box-shadow: 0 6px 20px rgba(0, 0, 0, 0.15);
+                transform: translateY(-2px);
+            }
+            
+            /* 主要内容区域 */
+            .content {
+                padding: 30px;
+            }
+            
+            .api-section {
+                margin-bottom: 40px;
+                background: white;
+                border-radius: 12px;
+                padding: 25px;
+                box-shadow: 0 4px 16px rgba(0, 0, 0, 0.08);
+                transition: transform 0.3s ease, box-shadow 0.3s ease;
+            }
+            
+            .api-section:hover {
+                transform: translateY(-4px);
+                box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12);
+            }
+            
+            h2 {
+                color: #2c3e50;
+                margin-top: 0;
+                margin-bottom: 25px;
+                font-size: 1.8rem;
+                border-bottom: 3px solid #3498db;
+                padding-bottom: 12px;
+                font-weight: 600;
+            }
+            
+            .api-category {
                 margin-bottom: 30px;
             }
-            .api-section {
-                background-color: white;
-                border-radius: 8px;
+            
+            h3 {
+                color: #34495e;
+                margin-bottom: 15px;
+                font-size: 1.3rem;
+                padding-left: 10px;
+                border-left: 4px solid #e74c3c;
+            }
+            
+            /* API项样式 */
+            .api-item {
+                background: linear-gradient(135deg, #f8f9fa 0%, #e9ecef 100%);
                 padding: 20px;
                 margin-bottom: 20px;
-                box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+                border-radius: 8px;
+                box-shadow: 0 2px 8px rgba(0, 0, 0, 0.05);
+                transition: all 0.3s ease;
+                position: relative;
+                overflow: hidden;
             }
-            h2 {
-                color: #3498db;
-                margin-top: 0;
-                border-bottom: 1px solid #eee;
-                padding-bottom: 10px;
+            
+            .api-item:hover {
+                box-shadow: 0 4px 16px rgba(0, 0, 0, 0.1);
+                transform: translateX(5px);
             }
-            h3 {
-                color: #2980b9;
+            
+            .api-item::before {
+                content: '';
+                position: absolute;
+                left: 0;
+                top: 0;
+                bottom: 0;
+                width: 4px;
+                background: #3498db;
             }
-            .api-endpoint {
-                background-color: #f8f9fa;
-                padding: 15px;
-                border-left: 4px solid #3498db;
+            
+            .endpoint {
+                font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
+                font-size: 16px;
+                font-weight: 500;
                 margin-bottom: 15px;
-                border-radius: 0 4px 4px 0;
+                word-break: break-all;
+                color: #2c3e50;
             }
-            .method {
+            
+            /* 方法标签样式 */
+            .method-tag {
                 display: inline-block;
-                padding: 4px 8px;
+                padding: 4px 10px;
                 border-radius: 4px;
+                font-size: 12px;
                 font-weight: bold;
+                color: white;
+                margin-right: 8px;
+            }
+            
+            .method-get {
+                background-color: #27ae60;
+            }
+            
+            .method-post {
+                background-color: #3498db;
+            }
+            
+            .method-put {
+                background-color: #f39c12;
+            }
+            
+            .method-delete {
+                background-color: #e74c3c;
+            }
+            
+            /* 按钮样式 */
+            .actions {
+                margin-bottom: 15px;
+            }
+            
+            .test-btn, .toggle-btn {
+                border: none;
+                padding: 10px 18px;
+                border-radius: 6px;
+                cursor: pointer;
                 font-size: 14px;
+                font-weight: 500;
+                transition: all 0.3s ease;
                 margin-right: 10px;
+                display: inline-flex;
+                align-items: center;
+                justify-content: center;
             }
-            .get {
-                background-color: #28a745;
+            
+            .test-btn {
+                background: linear-gradient(135deg, #27ae60 0%, #2ecc71 100%);
                 color: white;
+                box-shadow: 0 2px 6px rgba(39, 174, 96, 0.3);
             }
-            .post {
-                background-color: #007bff;
+            
+            .test-btn:hover {
+                background: linear-gradient(135deg, #229954 0%, #27ae60 100%);
+                transform: translateY(-2px);
+                box-shadow: 0 4px 12px rgba(39, 174, 96, 0.4);
+            }
+            
+            .test-btn:disabled {
+                background: #95a5a6;
+                cursor: not-allowed;
+                transform: none;
+                box-shadow: none;
+            }
+            
+            .toggle-btn {
+                background: linear-gradient(135deg, #3498db 0%, #5dade2 100%);
                 color: white;
+                box-shadow: 0 2px 6px rgba(52, 152, 219, 0.3);
             }
-            .put {
-                background-color: #ffc107;
-                color: #212529;
+            
+            .toggle-btn:hover {
+                background: linear-gradient(135deg, #2980b9 0%, #3498db 100%);
+                transform: translateY(-2px);
+                box-shadow: 0 4px 12px rgba(52, 152, 219, 0.4);
             }
-            .delete {
-                background-color: #dc3545;
-                color: white;
+            
+            /* 加载动画 */
+            .loading {
+                display: inline-block;
+                width: 24px;
+                height: 24px;
+                border: 3px solid #f3f3f3;
+                border-top: 3px solid #3498db;
+                border-radius: 50%;
+                animation: spin 1s linear infinite;
+                margin-left: 10px;
+                display: none;
             }
-            .url {
-                font-family: 'Courier New', Courier, monospace;
-                font-weight: bold;
-                color: #666;
+            
+            @keyframes spin {
+                0% { transform: rotate(0deg); }
+                100% { transform: rotate(360deg); }
             }
-            .description {
-                margin-top: 10px;
-                margin-left: 40px;
+            
+            /* 请求体样式 */
+            .request-body {
+                margin-top: 15px;
+                padding: 20px;
+                background: rgba(248, 249, 250, 0.8);
+                border-radius: 8px;
+                border: 1px solid #dee2e6;
+                transition: all 0.3s ease;
+                display: none;
             }
-            .note {
-                background-color: #fff3cd;
-                border: 1px solid #ffeaa7;
-                border-radius: 4px;
-                padding: 10px;
+            
+            .request-body textarea {
+                width: 100%;
+                padding: 12px;
+                border: 2px solid #ced4da;
+                border-radius: 6px;
+                font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
+                font-size: 14px;
+                resize: vertical;
+                min-height: 120px;
+                background: white;
+                transition: border-color 0.3s ease, box-shadow 0.3s ease;
+            }
+            
+            .request-body textarea:focus {
+                outline: none;
+                border-color: #3498db;
+                box-shadow: 0 0 0 3px rgba(52, 152, 219, 0.1);
+            }
+            
+            /* 结果区域样式 */
+            .result {
                 margin-top: 20px;
+                padding: 20px;
+                background: linear-gradient(135deg, #e3f2fd 0%, #bbdefb 100%);
+                border-radius: 8px;
+                box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+                display: none;
+                transition: all 0.3s ease;
+                animation: slideDown 0.3s ease-out;
+            }
+            
+            @keyframes slideDown {
+                from {
+                    opacity: 0;
+                    transform: translateY(-10px);
+                }
+                to {
+                    opacity: 1;
+                    transform: translateY(0);
+                }
+            }
+            
+            .result h4 {
+                margin-top: 0;
+                margin-bottom: 15px;
+                color: #1565c0;
+                font-size: 1.1rem;
+                font-weight: 600;
+            }
+            
+            .result-content {
+                font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
+                background: #2d3748;
+                color: #a0aec0;
+                padding: 16px;
+                border-radius: 6px;
+                max-height: 350px;
+                overflow-y: auto;
+                white-space: pre-wrap;
+                word-break: break-all;
+                border: 1px solid #4a5568;
+                box-shadow: inset 0 2px 8px rgba(0, 0, 0, 0.15);
+                font-size: 14px;
+                line-height: 1.5;
+            }
+            
+            /* 错误和成功状态 */
+            .error {
+                color: #e74c3c;
+            }
+            
+            .success {
+                color: #27ae60;
+            }
+            
+            /* 响应式设计 */
+            @media (max-width: 768px) {
+                .container {
+                    margin: 10px;
+                    border-radius: 8px;
+                }
+                
+                .header {
+                    padding: 20px;
+                }
+                
+                h1 {
+                    font-size: 2rem;
+                }
+                
+                .content {
+                    padding: 20px;
+                }
+                
+                .filter-input {
+                    width: 100%;
+                }
+                
+                .test-btn, .toggle-btn {
+                    padding: 8px 12px;
+                    font-size: 13px;
+                    margin-right: 5px;
+                    margin-bottom: 5px;
+                }
+                
+                .api-item {
+                    padding: 15px;
+                }
+                
+                .endpoint {
+                    font-size: 14px;
+                }
+            }
+            
+            @media (max-width: 480px) {
+                body {
+                    padding: 10px;
+                }
+                
+                h1 {
+                    font-size: 1.5rem;
+                }
+                
+                .subtitle {
+                    font-size: 0.9rem;
+                }
+                
+                .content {
+                    padding: 15px;
+                }
+                
+                .api-section {
+                    padding: 15px;
+                }
+                
+                h2 {
+                    font-size: 1.5rem;
+                }
+                
+                h3 {
+                    font-size: 1.1rem;
+                }
             }
         </style>
     </head>
     <body>
-        <h1>Live Debate 后端 API 接口文档</h1>
+        <div class="container">
+            <div class="header">
+                <h1>API接口测试工具</h1>
+                <p class="subtitle">快速测试和调试所有API接口</p>
+                <div class="filter-container">
+                    <input type="text" id="filter" class="filter-input" placeholder="搜索API接口...">
+                </div>
+            </div>
+            
+            <div class="content">
         
         <div class="api-section">
-            <h2>🔍 基础信息</h2>
-            <div class="note">
-                <p><strong>服务地址：</strong>http://localhost:8080</p>
-                <p><strong>API前缀：</strong>所有接口均以 <code>/api</code> 或 <code>/api/admin</code> 开头</p>
-                <p><strong>返回格式：</strong>所有接口返回JSON格式数据，包含 code、message 和 data 字段</p>
+            <h2>GET方法API接口列表</h2>
+            
+            <div class="api-category">
+                <h3>基础接口</h3>
+                
+                <div class="api-item">
+                    <div class="endpoint"><span class="method-tag method-get">GET</span>/api/health</div>
+                    <div class="actions">
+                        <button class="test-btn" onclick="testApi(this, '/api/health')">测试</button>
+                        <div class="loading"></div>
+                    </div>
+                    <div class="result">
+                        <h4>响应结果：</h4>
+                        <div class="result-content"></div>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="api-category">
+                <h3>统计接口</h3>
+                
+				<div class="api-item">
+                    <div class="endpoint"><span class="method-tag method-get">GET</span>/api/dashboard</div>
+                    <div class="actions">
+                        <button class="test-btn" onclick="testApi(this, '/api/dashboard')">测试</button>
+                        <div class="loading"></div>
+                    </div>
+                    <div class="result">
+                        <h4>响应结果：</h4>
+                        <div class="result-content"></div>
+                    </div>
+                </div>
+                
+                <div class="api-item">
+                    <div class="endpoint"><span class="method-tag method-get">GET</span>/api/votes</div>
+                    <div class="actions">
+                        <button class="test-btn" onclick="testApi(this, '/api/votes')">测试</button>
+                        <div class="loading"></div>
+                    </div>
+                    <div class="result">
+                        <h4>响应结果：</h4>
+                        <div class="result-content"></div>
+                    </div>
+                </div>
+
+                <div class="api-item">
+                    <div class="endpoint"><span class="method-tag method-get">GET</span>/api/live-schedule</div>
+                    <div class="actions">
+                        <button class="test-btn" onclick="testApi(this, '/api/live-schedule')">测试</button>
+                        <div class="loading"></div>
+                    </div>
+                    <div class="result">
+                        <h4>响应结果：</h4>
+                        <div class="result-content"></div>
+                    </div>
+                </div>
+                
+                <div class="api-item">
+                    <div class="endpoint"><span class="method-tag method-get">GET</span>/api/ai-status</div>
+                    <div class="actions">
+                        <button class="test-btn" onclick="testApi(this, '/api/ai-status')">测试</button>
+                        <div class="loading"></div>
+                    </div>
+                    <div class="result">
+                        <h4>响应结果：</h4>
+                        <div class="result-content"></div>
+                    </div>
+                </div>
+            </div>  
+            
+			<div class="api-category">
+                <h3>辩论接口</h3>
+                
+                <div class="api-item">
+                    <div class="endpoint"><span class="method-tag method-get">GET</span>/api/admin/debate</div>
+                    <div class="actions">
+                        <button class="test-btn" onclick="testApi(this, '/api/admin/debate')">测试</button>
+                        <div class="loading"></div>
+                    </div>
+                    <div class="result">
+                        <h4>响应结果：</h4>
+                        <div class="result-content"></div>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="api-category">
+                <h3>直播流接口</h3>
+                
+                <div class="api-item">
+                    <div class="endpoint"><span class="method-tag method-get">GET</span>/api/admin/streams</div>
+                    <div class="actions">
+                        <button class="test-btn" onclick="testApi(this, '/api/admin/streams')">测试</button>
+                        <div class="loading"></div>
+                    </div>
+                    <div class="result">
+                        <h4>响应结果：</h4>
+                        <div class="result-content"></div>
+                    </div>
+                </div>
+            </div>    
+
+			<div class="api-category">
+                <h3>管理接口</h3>
+                
+                <div class="api-item">
+                    <div class="endpoint"><span class="method-tag method-get">GET</span>/api/admin/users</div>
+                    <div class="actions">
+                        <button class="test-btn" onclick="testApi(this, '/api/admin/users')">测试</button>
+                        <div class="loading"></div>
+                    </div>
+                    <div class="result">
+                        <h4>响应结果：</h4>
+                        <div class="result-content"></div>
+                    </div>
+                </div>
+                
+                <div class="api-item">
+                    <div class="endpoint"><span class="method-tag method-get">GET</span>/api/admin/users/:id</div>
+                    <div class="actions">
+                        <button class="test-btn" onclick="testApi(this, '/api/admin/users/:id')">测试</button>
+                        <div class="loading"></div>
+                    </div>
+                    <div class="result">
+                        <h4>响应结果：</h4>
+                        <div class="result-content"></div>
+                    </div>
+                </div>
+            </div>
+               
+            </div>
+        </div>
+        
+        <!-- POST方法API接口列表 -->
+        <div class="api-section">
+            <h2>POST方法API接口列表</h2>
+            
+            <div class="api-category">
+                <h3>用户相关接口</h3>
+                
+                <div class="api-item">
+                    <div class="endpoint"><span class="method-tag method-post">POST</span>/api/wechat-login</div>
+                    <div class="actions">
+                        <button class="test-btn" onclick="testApi(this, '/api/wechat-login', 'POST')">测试</button>
+                        <button class="toggle-btn" onclick="toggleRequestBody(this.closest('.api-item'))">请求体</button>
+                        <div class="loading"></div>
+                    </div>
+                    <div class="request-body" style="display: none; margin-top: 10px;">
+                        <textarea rows="5" cols="80" placeholder="输入JSON格式的请求体...">{"code": "mock_code"}</textarea>
+                    </div>
+                    <div class="result">
+                        <h4>响应结果：</h4>
+                        <div class="result-content"></div>
+                    </div>
+                </div>
+                
+                <div class="api-item">
+                    <div class="endpoint"><span class="method-tag method-post">POST</span>/api/user-vote</div>
+                    <div class="actions">
+                        <button class="test-btn" onclick="testApi(this, '/api/user-vote', 'POST')">测试</button>
+                        <button class="toggle-btn" onclick="toggleRequestBody(this.closest('.api-item'))">请求体</button>
+                        <div class="loading"></div>
+                    </div>
+                    <div class="request-body" style="display: none; margin-top: 10px;">
+                        <textarea rows="5" cols="80" placeholder="输入JSON格式的请求体...">{"userId": "test_user", "voteType": "agree", "streamId": "stream_1"}</textarea>
+                    </div>
+                    <div class="result">
+                        <h4>响应结果：</h4>
+                        <div class="result-content"></div>
+                    </div>
+                </div>
+                
+                <div class="api-item">
+                    <div class="endpoint"><span class="method-tag method-post">POST</span>/api/comment</div>
+                    <div class="actions">
+                        <button class="test-btn" onclick="testApi(this, '/api/comment', 'POST')">测试</button>
+                        <button class="toggle-btn" onclick="toggleRequestBody(this.closest('.api-item'))">请求体</button>
+                        <div class="loading"></div>
+                    </div>
+                    <div class="request-body" style="display: none; margin-top: 10px;">
+                        <textarea rows="5" cols="80" placeholder="输入JSON格式的请求体...">{"userId": "test_user", "content": "测试评论", "streamId": "stream_1"}</textarea>
+                    </div>
+                    <div class="result">
+                        <h4>响应结果：</h4>
+                        <div class="result-content"></div>
+                    </div>
+                </div>
+                
+                <div class="api-item">
+                    <div class="endpoint"><span class="method-tag method-post">POST</span>/api/like</div>
+                    <div class="actions">
+                        <button class="test-btn" onclick="testApi(this, '/api/like', 'POST')">测试</button>
+                        <button class="toggle-btn" onclick="toggleRequestBody(this.closest('.api-item'))">请求体</button>
+                        <div class="loading"></div>
+                    </div>
+                    <div class="request-body" style="display: none; margin-top: 10px;">
+                        <textarea rows="5" cols="80" placeholder="输入JSON格式的请求体...">{"userId": "test_user", "contentId": "content_1", "type": "comment"}</textarea>
+                    </div>
+                    <div class="result">
+                        <h4>响应结果：</h4>
+                        <div class="result-content"></div>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="api-category">
+                <h3>直播管理接口</h3>
+                
+                <div class="api-item">
+                    <div class="endpoint"><span class="method-tag method-post">POST</span>/api/admin/live/start</div>
+                    <div class="actions">
+                        <button class="test-btn" onclick="testApi(this, '/api/admin/live/start', 'POST')">测试</button>
+                        <button class="toggle-btn" onclick="toggleRequestBody(this.closest('.api-item'))">请求体</button>
+                        <div class="loading"></div>
+                    </div>
+                    <div class="request-body" style="display: none; margin-top: 10px;">
+                        <textarea rows="5" cols="80" placeholder="输入JSON格式的请求体...">{"streamId": "stream_1", "title": "测试直播"}</textarea>
+                    </div>
+                    <div class="result">
+                        <h4>响应结果：</h4>
+                        <div class="result-content"></div>
+                    </div>
+                </div>
+                
+                <div class="api-item">
+                    <div class="endpoint"><span class="method-tag method-post">POST</span>/api/admin/live/stop</div>
+                    <div class="actions">
+                        <button class="test-btn" onclick="testApi(this, '/api/admin/live/stop', 'POST')">测试</button>
+                        <button class="toggle-btn" onclick="toggleRequestBody(this.closest('.api-item'))">请求体</button>
+                        <div class="loading"></div>
+                    </div>
+                    <div class="request-body" style="display: none; margin-top: 10px;">
+                        <textarea rows="5" cols="80" placeholder="输入JSON格式的请求体...">{"streamId": "stream_1"}</textarea>
+                    </div>
+                    <div class="result">
+                        <h4>响应结果：</h4>
+                        <div class="result-content"></div>
+                    </div>
+                </div>
+                
+                <div class="api-item">
+                    <div class="endpoint"><span class="method-tag method-post">POST</span>/api/admin/live/control</div>
+                    <div class="actions">
+                        <button class="test-btn" onclick="testApi(this, '/api/admin/live/control', 'POST')">测试</button>
+                        <button class="toggle-btn" onclick="toggleRequestBody(this.closest('.api-item'))">请求体</button>
+                        <div class="loading"></div>
+                    </div>
+                    <div class="request-body" style="display: none; margin-top: 10px;">
+                        <textarea rows="5" cols="80" placeholder="输入JSON格式的请求体...">{"action": "start", "streamId": "stream_1"}</textarea>
+                    </div>
+                    <div class="result">
+                        <h4>响应结果：</h4>
+                        <div class="result-content"></div>
+                    </div>
+                </div>
+                
+                <div class="api-item">
+                    <div class="endpoint"><span class="method-tag method-post">POST</span>/api/admin/live/schedule</div>
+                    <div class="actions">
+                        <button class="test-btn" onclick="testApi(this, '/api/admin/live/schedule', 'POST')">测试</button>
+                        <button class="toggle-btn" onclick="toggleRequestBody(this.closest('.api-item'))">请求体</button>
+                        <div class="loading"></div>
+                    </div>
+                    <div class="request-body" style="display: none; margin-top: 10px;">
+                        <textarea rows="5" cols="80" placeholder="输入JSON格式的请求体...">{"title": "预约直播", "scheduledTime": "2024-01-01T12:00:00Z", "streamId": "stream_1"}</textarea>
+                    </div>
+                    <div class="result">
+                        <h4>响应结果：</h4>
+                        <div class="result-content"></div>
+                    </div>
+                </div>
+                
+                <div class="api-item">
+                    <div class="endpoint"><span class="method-tag method-post">POST</span>/api/admin/live/update-votes</div>
+                    <div class="actions">
+                        <button class="test-btn" onclick="testApi(this, '/api/admin/live/update-votes', 'POST')">测试</button>
+                        <button class="toggle-btn" onclick="toggleRequestBody(this.closest('.api-item'))">请求体</button>
+                        <div class="loading"></div>
+                    </div>
+                    <div class="request-body" style="display: none; margin-top: 10px;">
+                        <textarea rows="5" cols="80" placeholder="输入JSON格式的请求体...">{"agree": 10, "disagree": 5, "streamId": "stream_1"}</textarea>
+                    </div>
+                    <div class="result">
+                        <h4>响应结果：</h4>
+                        <div class="result-content"></div>
+                    </div>
+                </div>
+                
+                <div class="api-item">
+                    <div class="endpoint"><span class="method-tag method-post">POST</span>/api/admin/live/reset-votes</div>
+                    <div class="actions">
+                        <button class="test-btn" onclick="testApi(this, '/api/admin/live/reset-votes', 'POST')">测试</button>
+                        <button class="toggle-btn" onclick="toggleRequestBody(this.closest('.api-item'))">请求体</button>
+                        <div class="loading"></div>
+                    </div>
+                    <div class="request-body" style="display: none; margin-top: 10px;">
+                        <textarea rows="5" cols="80" placeholder="输入JSON格式的请求体...">{"streamId": "stream_1"}</textarea>
+                    </div>
+                    <div class="result">
+                        <h4>响应结果：</h4>
+                        <div class="result-content"></div>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="api-category">
+                <h3>AI内容管理接口</h3>
+                
+                <div class="api-item">
+                    <div class="endpoint"><span class="method-tag method-post">POST</span>/api/admin/ai/start</div>
+                    <div class="actions">
+                        <button class="test-btn" onclick="testApi(this, '/api/admin/ai/start', 'POST')">测试</button>
+                        <button class="toggle-btn" onclick="toggleRequestBody(this.closest('.api-item'))">请求体</button>
+                        <div class="loading"></div>
+                    </div>
+                    <div class="request-body" style="display: none; margin-top: 10px;">
+                        <textarea rows="5" cols="80" placeholder="输入JSON格式的请求体...">{"topic": "AI技术发展"}</textarea>
+                    </div>
+                    <div class="result">
+                        <h4>响应结果：</h4>
+                        <div class="result-content"></div>
+                    </div>
+                </div>
+                
+                <div class="api-item">
+                    <div class="endpoint"><span class="method-tag method-post">POST</span>/api/admin/ai/stop</div>
+                    <div class="actions">
+                        <button class="test-btn" onclick="testApi(this, '/api/admin/ai/stop', 'POST')">测试</button>
+                        <button class="toggle-btn" onclick="toggleRequestBody(this.closest('.api-item'))">请求体</button>
+                        <div class="loading"></div>
+                    </div>
+                    <div class="request-body" style="display: none; margin-top: 10px;">
+                        <textarea rows="5" cols="80" placeholder="输入JSON格式的请求体...">{}</textarea>
+                    </div>
+                    <div class="result">
+                        <h4>响应结果：</h4>
+                        <div class="result-content"></div>
+                    </div>
+                </div>
+                
+                <div class="api-item">
+                    <div class="endpoint"><span class="method-tag method-post">POST</span>/api/admin/ai/toggle</div>
+                    <div class="actions">
+                        <button class="test-btn" onclick="testApi(this, '/api/admin/ai/toggle', 'POST')">测试</button>
+                        <button class="toggle-btn" onclick="toggleRequestBody(this.closest('.api-item'))">请求体</button>
+                        <div class="loading"></div>
+                    </div>
+                    <div class="request-body" style="display: none; margin-top: 10px;">
+                        <textarea rows="5" cols="80" placeholder="输入JSON格式的请求体...">{"enabled": true}</textarea>
+                    </div>
+                    <div class="result">
+                        <h4>响应结果：</h4>
+                        <div class="result-content"></div>
+                    </div>
+                </div>
+                
+                <div class="api-item">
+                    <div class="endpoint"><span class="method-tag method-post">POST</span>/api/admin/ai-content</div>
+                    <div class="actions">
+                        <button class="test-btn" onclick="testApi(this, '/api/admin/ai-content', 'POST')">测试</button>
+                        <button class="toggle-btn" onclick="toggleRequestBody(this.closest('.api-item'))">请求体</button>
+                        <div class="loading"></div>
+                    </div>
+                    <div class="request-body" style="display: none; margin-top: 10px;">
+                        <textarea rows="5" cols="80" placeholder="输入JSON格式的请求体...">{"content": "AI生成的内容", "type": "text"}</textarea>
+                    </div>
+                    <div class="result">
+                        <h4>响应结果：</h4>
+                        <div class="result-content"></div>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="api-category">
+                <h3>直播流管理接口</h3>
+                
+                <div class="api-item">
+                    <div class="endpoint"><span class="method-tag method-post">POST</span>/api/admin/streams</div>
+                    <div class="actions">
+                        <button class="test-btn" onclick="testApi(this, '/api/admin/streams', 'POST')">测试</button>
+                        <button class="toggle-btn" onclick="toggleRequestBody(this.closest('.api-item'))">请求体</button>
+                        <div class="loading"></div>
+                    </div>
+                    <div class="request-body" style="display: none; margin-top: 10px;">
+                        <textarea rows="5" cols="80" placeholder="输入JSON格式的请求体...">{"name": "测试直播流", "url": "http://example.com/live/stream.m3u8", "type": "hls", "description": "测试直播流描述", "enabled": true}</textarea>
+                    </div>
+                    <div class="result">
+                        <h4>响应结果：</h4>
+                        <div class="result-content"></div>
+                    </div>
+                </div>
             </div>
         </div>
         
         <div class="api-section">
-            <h2>🛠️ 基础接口</h2>
+            <h2>PUT方法API接口列表</h2>
             
-            <div class="api-endpoint">
-                <span class="method get">GET</span>
-                <span class="url">/api/health</span>
-                <div class="description">
-                    <p>健康检查接口，用于验证服务是否正常运行</p>
+            <div class="api-category">
+                <h3>辩论管理接口</h3>
+                
+                <div class="api-item">
+                    <div class="endpoint"><span class="method-tag method-put">PUT</span>/api/admin/debate</div>
+                    <div class="actions">
+                        <button class="test-btn" onclick="testApi(this, '/api/admin/debate', 'PUT')">测试</button>
+                        <button class="toggle-btn" onclick="toggleRequestBody(this.closest('.api-item'))">请求体</button>
+                        <div class="loading"></div>
+                    </div>
+                    <div class="request-body" style="display: none; margin-top: 10px;">
+                        <textarea rows="5" cols="80" placeholder="输入JSON格式的请求体...">{"title": "测试辩题", "description": "测试辩题描述", "options": [{"id": "1", "content": "选项1"}, {"id": "2", "content": "选项2"}], "active": true}</textarea>
+                    </div>
+                    <div class="result">
+                        <h4>响应结果：</h4>
+                        <div class="result-content"></div>
+                    </div>
                 </div>
+            </div>
+            
+            <div class="api-category">
+                <h3>投票管理接口</h3>
+                
+                <div class="api-item">
+                    <div class="endpoint"><span class="method-tag method-put">PUT</span>/api/admin/votes</div>
+                    <div class="actions">
+                        <button class="test-btn" onclick="testApi(this, '/api/admin/votes', 'PUT')">测试</button>
+                        <button class="toggle-btn" onclick="toggleRequestBody(this.closest('.api-item'))">请求体</button>
+                        <div class="loading"></div>
+                    </div>
+                    <div class="request-body" style="display: none; margin-top: 10px;">
+                        <textarea rows="5" cols="80" placeholder="输入JSON格式的请求体...">{"optionId": "1", "increment": true}</textarea>
+                    </div>
+                    <div class="result">
+                        <h4>响应结果：</h4>
+                        <div class="result-content"></div>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="api-category">
+                <h3>AI内容管理接口</h3>
+                
+                <div class="api-item">
+                    <div class="endpoint"><span class="method-tag method-put">PUT</span>/api/admin/ai-content/:id</div>
+                    <div class="actions">
+                        <button class="test-btn" onclick="testApi(this, '/api/admin/ai-content/1', 'PUT')">测试</button>
+                        <button class="toggle-btn" onclick="toggleRequestBody(this.closest('.api-item'))">请求体</button>
+                        <div class="loading"></div>
+                    </div>
+                    <div class="request-body" style="display: none; margin-top: 10px;">
+                        <textarea rows="5" cols="80" placeholder="输入JSON格式的请求体...">{"content": "更新后的AI内容", "type": "text", "enabled": true}</textarea>
+                    </div>
+                    <div class="result">
+                        <h4>响应结果：</h4>
+                        <div class="result-content"></div>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="api-category">
+                <h3>直播流管理接口</h3>
+                
+                <div class="api-item">
+                    <div class="endpoint"><span class="method-tag method-put">PUT</span>/api/admin/streams/:id</div>
+                    <div class="actions">
+                        <button class="test-btn" onclick="testApi(this, '/api/admin/streams/stream-001', 'PUT')">测试</button>
+                        <button class="toggle-btn" onclick="toggleRequestBody(this.closest('.api-item'))">请求体</button>
+                        <div class="loading"></div>
+                    </div>
+                    <div class="request-body" style="display: none; margin-top: 10px;">
+                        <textarea rows="5" cols="80" placeholder="输入JSON格式的请求体...">{"name": "更新后的直播流", "url": "http://example.com/live/updated.m3u8", "type": "hls", "description": "更新后的描述", "enabled": true}</textarea>
+                    </div>
+                    <div class="result">
+                        <h4>响应结果：</h4>
+                        <div class="result-content"></div>
+                    </div>
+                </div>
+            </div>
             </div>
         </div>
         
-        <div class="api-section">
-            <h2>📊 统计相关接口</h2>
+        <script>
+            // 测试API接口 - 支持GET、POST和PUT
+            async function testApi(button, endpoint, method = 'GET') {
+                // 获取API项容器
+                const apiItem = button.closest('.api-item');
+                // 使用更可靠的方式查找loading元素和结果区域
+                const loading = apiItem.querySelector('.loading');
+                const resultDiv = apiItem.querySelector('.result');
+                const resultContent = resultDiv.querySelector('.result-content');
+                
+                // 重置状态
+                resultDiv.style.display = 'none';
+                loading.style.display = 'inline-block';
+                button.disabled = true;
+                
+                // 清除之前的定时器
+                if (window.apiResultTimer) {
+                    clearTimeout(window.apiResultTimer);
+                }
+                
+                try {
+                    let response;
+                    
+                    if (method === 'GET') {
+                        response = await fetch(endpoint);
+                    } else if (method === 'POST' || method === 'PUT') {
+                        // 获取请求体输入框
+                        const requestBodyDiv = apiItem.querySelector('.request-body');
+                        let requestBody = {};
+                        
+                        if (requestBodyDiv) {
+                            const requestBodyText = requestBodyDiv.querySelector('textarea').value;
+                            try {
+                                requestBody = requestBodyText ? JSON.parse(requestBodyText) : {};
+                            } catch (parseError) {
+                    
+                                resultContent.classList.add('error');
+                                resultDiv.style.display = 'block';
+                                return;
+                            }
+                        }
+                        
+                        response = await fetch(endpoint, {
+                            method: method,
+                            headers: {
+                                'Content-Type': 'application/json'
+                            },
+                            body: JSON.stringify(requestBody)
+                        });
+                    }
+                    
+                    // 检查响应状态
+                    if (!response.ok) {
+                        
+                    }
+                    
+                    const data = await response.json();
+                    resultContent.textContent = JSON.stringify(data, null, 2);
+                    resultContent.classList.remove('error');
+                    resultContent.classList.add('success');
+                    resultDiv.style.display = 'block';
+                    
+                    // 6秒后自动隐藏结果
+                    window.apiResultTimer = setTimeout(() => {
+                        resultDiv.style.display = 'none';
+                    }, 6000);
+                    
+                } catch (error) {
+                    
+                    resultContent.classList.add('error');
+                    resultContent.classList.remove('success');
+                    resultDiv.style.display = 'block';
+                    
+                    // 6秒后自动隐藏结果
+                    window.apiResultTimer = setTimeout(() => {
+                        resultDiv.style.display = 'none';
+                    }, 6000);
+                } finally {
+                    loading.style.display = 'none';
+                    button.disabled = false;
+                }
+            }
             
-            <div class="api-endpoint">
-                <span class="method get">GET</span>
-                <span class="url">/api/dashboard</span>
-                <div class="description">
-                    <p>获取仪表盘统计数据，包括用户统计、直播统计、辩论设置等</p>
-                </div>
-            </div>
+            // 搜索过滤功能
+            document.getElementById('filter').addEventListener('input', function(e) {
+                const searchTerm = e.target.value.toLowerCase();
+                const apiItems = document.querySelectorAll('.api-item');
+                
+                apiItems.forEach(item => {
+                    const endpoint = item.querySelector('.endpoint').textContent.toLowerCase();
+                    if (endpoint.includes(searchTerm)) {
+                        item.style.display = 'block';
+                    } else {
+                        item.style.display = 'none';
+                    }
+                });
+            });
             
-            <div class="api-endpoint">
-                <span class="method get">GET</span>
-                <span class="url">/api/votes</span>
-                <div class="description">
-                    <p>获取投票统计数据</p>
-                </div>
-            </div>
-            
-            <div class="api-endpoint">
-                <span class="method post">POST</span>
-                <span class="url">/api/vote</span>
-                <div class="description">
-                    <p>提交投票</p>
-                    <p>参数：{ "side": "affirmative" | "negative" }</p>
-                </div>
-            </div>
-            
-            <div class="api-endpoint">
-                <span class="method get">GET</span>
-                <span class="url">/api/live-schedule</span>
-                <div class="description">
-                    <p>获取直播计划</p>
-                </div>
-            </div>
-            
-            <div class="api-endpoint">
-                <span class="method put">PUT</span>
-                <span class="url">/api/live-schedule</span>
-                <div class="description">
-                    <p>更新直播计划</p>
-                </div>
-            </div>
-            
-            <div class="api-endpoint">
-                <span class="method get">GET</span>
-                <span class="url">/api/ai-status</span>
-                <div class="description">
-                    <p>获取AI状态</p>
-                </div>
-            </div>
-            
-            <div class="api-endpoint">
-                <span class="method post">POST</span>
-                <span class="url">/api/ai-control</span>
-                <div class="description">
-                    <p>控制AI功能</p>
-                </div>
-            </div>
-        </div>
-        
-        <div class="api-section">
-            <h2>🎭 辩论相关接口</h2>
-            
-            <div class="api-endpoint">
-                <span class="method get">GET</span>
-                <span class="url">/api/admin/debate</span>
-                <div class="description">
-                    <p>获取辩论设置</p>
-                </div>
-            </div>
-            
-            <div class="api-endpoint">
-                <span class="method put">PUT</span>
-                <span class="url">/api/admin/debate</span>
-                <div class="description">
-                    <p>更新辩论设置</p>
-                </div>
-            </div>
-        </div>
-        
-        <div class="api-section">
-            <h2>📹 直播流相关接口</h2>
-            
-            <div class="api-endpoint">
-                <span class="method get">GET</span>
-                <span class="url">/api/admin/streams</span>
-                <div class="description">
-                    <p>获取直播流列表</p>
-                </div>
-            </div>
-            
-            <div class="api-endpoint">
-                <span class="method post">POST</span>
-                <span class="url">/api/admin/streams</span>
-                <div class="description">
-                    <p>添加新的直播流</p>
-                    <p>参数：{ "name": "流名称", "url": "流地址", "type": "hls|rtmp|flv", "description": "描述", "enabled": true|false }</p>
-                </div>
-            </div>
-            
-            <div class="api-endpoint">
-                <span class="method put">PUT</span>
-                <span class="url">/api/admin/streams/:id</span>
-                <div class="description">
-                    <p>更新直播流信息</p>
-                </div>
-            </div>
-            
-            <div class="api-endpoint">
-                <span class="method delete">DELETE</span>
-                <span class="url">/api/admin/streams/:id</span>
-                <div class="description">
-                    <p>删除直播流</p>
-                </div>
-            </div>
-        </div>
-        
-        <div class="api-section">
-            <h2>👥 用户相关接口</h2>
-            
-            <div class="api-endpoint">
-                <span class="method get">GET</span>
-                <span class="url">/api/admin/users</span>
-                <div class="description">
-                    <p>获取用户列表</p>
-                </div>
-            </div>
-            
-            <div class="api-endpoint">
-                <span class="method get">GET</span>
-                <span class="url">/api/admin/users/:id</span>
-                <div class="description">
-                    <p>获取单个用户信息</p>
-                </div>
-            </div>
-            
-            <div class="api-endpoint">
-                <span class="method put">PUT</span>
-                <span class="url">/api/admin/users/:id</span>
-                <div class="description">
-                    <p>更新用户信息</p>
-                </div>
-            </div>
-            
-            <div class="api-endpoint">
-                <span class="method delete">DELETE</span>
-                <span class="url">/api/admin/users/:id</span>
-                <div class="description">
-                    <p>删除用户</p>
-                </div>
-            </div>
-            
-            <div class="api-endpoint">
-                <span class="method post">POST</span>
-                <span class="url">/api/admin/login</span>
-                <div class="description">
-                    <p>用户登录</p>
-                    <p>参数：{ "username": "用户名", "password": "密码" }</p>
-                </div>
-            </div>
-        </div>
-        
-        <div class="api-section">
-            <h2>💬 直播控制接口</h2>
-            
-            <div class="api-endpoint">
-                <span class="method post">POST</span>
-                <span class="url">/api/admin/live/start</span>
-                <div class="description">
-                    <p>开始直播</p>
-                </div>
-            </div>
-            
-            <div class="api-endpoint">
-                <span class="method post">POST</span>
-                <span class="url">/api/admin/live/stop</span>
-                <div class="description">
-                    <p>停止直播</p>
-                </div>
-            </div>
-            
-            <div class="api-endpoint">
-                <span class="method post">POST</span>
-                <span class="url">/api/admin/live/update-votes</span>
-                <div class="description">
-                    <p>更新投票数据</p>
-                </div>
-            </div>
-            
-            <div class="api-endpoint">
-                <span class="method post">POST</span>
-                <span class="url">/api/admin/live/reset-votes</span>
-                <div class="description">
-                    <p>重置投票数据</p>
-                </div>
-            </div>
-        </div>
-        
-        <div class="api-section">
-            <h2>🤖 AI控制接口</h2>
-            
-            <div class="api-endpoint">
-                <span class="method post">POST</span>
-                <span class="url">/api/admin/ai/start</span>
-                <div class="description">
-                    <p>启动AI功能</p>
-                </div>
-            </div>
-            
-            <div class="api-endpoint">
-                <span class="method post">POST</span>
-                <span class="url">/api/admin/ai/stop</span>
-                <div class="description">
-                    <p>停止AI功能</p>
-                </div>
-            </div>
-            
-            <div class="api-endpoint">
-                <span class="method post">POST</span>
-                <span class="url">/api/admin/ai/toggle</span>
-                <div class="description">
-                    <p>切换AI状态</p>
-                </div>
-            </div>
-        </div>
+            // 切换请求体输入框显示/隐藏
+            function toggleRequestBody(apiItem) {
+                const requestBodyDiv = apiItem.querySelector('.request-body');
+                if (requestBodyDiv) {
+                    requestBodyDiv.style.display = requestBodyDiv.style.display === 'none' ? 'block' : 'none';
+                }
+            }
+        </script>
     </body>
-    </html>
-    `;
-    
+    </html>`;
+ 
     res.send(apiDocumentation);
 });
 
 // 提供前端静态文件服务
 app.use(express.static(path.join(__dirname, '.')));
-
-// ==================== 优先代理到后端服务器（如果启用） ====================
-// 如果 PRIORITIZE_BACKEND_SERVER 为 true，所有 API 请求优先代理到后端服务器
-if (PRIORITIZE_BACKEND_SERVER && BACKEND_SERVER_URL) {
-	console.log('🔗 启用后端服务器优先模式：所有 API 请求将优先代理到后端服务器');
-	console.log(`🔗 后端服务器地址: ${BACKEND_SERVER_URL}`);
-	
-	// 创建代理中间件 - 代理所有 /api 开头的路径到后端服务器
-	const backendProxy = createProxyMiddleware({
-		target: BACKEND_SERVER_URL,
-		changeOrigin: true,
-		pathRewrite: {
-			// 保持路径不变，直接转发
-			'^/api': '/api'
-		},
-		logger: console,
-		onProxyReq: (proxyReq, req, res) => {
-			console.log(`🔄 [代理] ${req.method} ${req.path} -> ${BACKEND_SERVER_URL}${req.path}`);
-		},
-		onProxyRes: (proxyRes, req, res) => {
-			console.log(`✅ [代理] ${req.path} <- ${proxyRes.statusCode} ${BACKEND_SERVER_URL}`);
-		},
-		onError: (err, req, res) => {
-			console.error(`❌ [代理错误] ${req.path}:`, err.message);
-			if (!res.headersSent) {
-				res.status(502).json({
-					success: false,
-					error: 'Bad Gateway',
-					message: `无法连接到后端服务器 ${BACKEND_SERVER_URL}`,
-					path: req.path,
-					details: err.message
-				});
-			}
-		}
-	});
-	
-	// 在所有本地路由之前，添加代理中间件
-	// 使用 app.use('/api', ...) 确保所有 /api 开头的请求都被代理（包括 /api/v1/*）
-	app.use('/api', backendProxy);
-	console.log('✅ 代理中间件已成功配置');
-}
 
 // ==================== 直播流代理（SRS 服务器） ====================
 // 将直播流请求代理到 SRS 服务器，让小程序通过中间层访问
